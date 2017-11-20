@@ -1,0 +1,394 @@
+---
+title: "부동산 문제 풀이"
+---
+
+## 부동산 문제 풀이
+
+- [국토교통부 실거래가 공개시스템](http://rtdown.molit.go.kr/)
+
+#### - 1단계 데이터 전처리
+#### - 2단계 탐색적 자료 분석
+#### - 2-1단계 시계열 분석
+#### - 2-2단계 맵지도 분석
+#### - 3단계 기계학습 예측 (TBD)
+#### - 4단계 외부데이터 조인 (TBD)
+
+```{r}
+#윈도우 10 64bit, R 3.4.2 버전
+#설치 라이브러리, Rtools 설치 필요 (관리자 권한으로 설치)
+#install.packages("tidyverse")
+#install.packages("readxl")
+#install.packages('DT')
+#install.packages('glue')
+#install.packages('glue')
+#install.packages("htmlwidgets") 
+#install.packages("plotly") 
+#install.packages('ggmap')
+#install.packages("leaflet")
+#install.packages("leaflet")
+#install.packages("leaflet.minicharts")
+library(tidyverse)
+library(readxl)
+library(DT)
+library(htmlwidgets)
+library(sp)
+library(plotly)
+library(ggmap)
+library(lubridate)
+library(leaflet)
+library(leaflet.minicharts)
+library(htmltools)
+```
+
+## 1단계 데이터 전처리 (1)
+
+- 월별로 데이터 다운로드 받을 수 있는 창이 개별 존재, 2017년은 기간 조회하여 데이터 다운로드 
+- [R에서 open API 사용하기 _ 국토교통부 실거래가 정보 가져오기]
+(http://blog.naver.com/PostView.nhn?blogId=juhy9212&logNo=221007989739)
+- 데이터 병합 과정 (전체 약 60만건)
+
+```{r}
+setwd("C:/budong/data")
+files <- list.files(pattern=".xls")
+DF <- NULL
+files
+
+for (f in files) {
+  year_month <- paste0(substr(f, 1, 4), substr(f, 7, 8))
+  dat <- read_excel(f, skip=7, sheet = "서울특별시")
+  dat <- cbind(dat, contractyear = year_month)
+  DF <- rbind(DF, dat)
+  cat('------', dim(DF), '------', '\t')
+}
+
+setwd("C:/budong/data/2017")
+files <- list.files(pattern=".xlsx")
+DF2 <- NULL
+for (f in files) {
+  dat2 <- read_excel(f)
+  DF2 <- rbind(DF2, dat2)
+  cat('------', dim(DF2), '------', '\t')
+}
+
+dim(DF)
+dim(DF2)
+
+colnames(DF) <- c('municipality', 'address', 'complex', 'exclusivearea', 'contractdate', 'transactionamount', 'floors', 'construction', 'roadname', 'contractyear')
+
+colnames(DF2) <- c('municipality', 'address', 'home', 'abundance', 'complex', 'exclusivearea', 'contractyear', 'contractdate', 'transactionamount', 'floors', 'construction', 'roadname')
+
+df_colnames <- colnames(DF)
+DF_all <- rbind(DF, DF2[,df_colnames])
+dim(DF_all)
+
+#save(DF_all, file='DF_all.Rdata')
+#write.csv(DF_all, file='DF_all.csv', row.names=FALSE)
+```
+
+## 1단계 데이터 전처리 (2)
+
+- 데이터 구조 확인 
+- 시, 구, 동으로 변수 구분 및 전용 면적 및 변수 전처리
+
+```{r}
+glimpse(DF_all)
+
+DF_all <- DF_all %>%  mutate(
+	location_1 = sapply(strsplit(DF_all$municipality, ' '), "[", 1),
+	location_2 = sapply(strsplit(DF_all$municipality, ' '), "[", 2),
+	location_3 = sapply(strsplit(DF_all$municipality, ' '), "[", 3),
+      exclusivearea = as.numeric(exclusivearea),
+ exclusivearea_section = case_when(exclusivearea < 67 ~ '0~66',
+                             exclusivearea >= 67 & exclusivearea < 100 ~ '67~100',
+                             exclusivearea >= 100 & exclusivearea < 132 ~ '100~131',
+                             exclusivearea >= 132 & exclusivearea < 165 ~ '132~165',
+                             exclusivearea >= 165 & exclusivearea < 198 ~ '165~197',
+                             exclusivearea >= 198 & exclusivearea < 330 ~ '198~329',
+                             exclusivearea >= 330 ~ '330이상'),
+	transactionamount = as.numeric(gsub(',', '', transactionamount)),
+      floors = as.integer(floors),
+	construction = as.integer(construction),
+	roadname = as.factor(roadname),
+      contractyear = ymd(paste0(contractyear,ifelse(str_sub(contractdate, 1, 2) == '1~', '01', str_sub(contractdate, 1, 2))))
+)
+
+```
+
+## 2단계 탐색적 자료 분석
+### 2-1단계 시계열 분석 (1)
+
+- exclusivearea 별 매매가 분포 확인
+
+```{r}
+exclusivearea_price <- DF_all %>% filter(location_1 == '서울특별시') %>%
+	group_by(exclusivearea_section) %>%
+	summarise(
+		count = n(),
+		price_mean = mean(transactionamount, na.rm=T),
+		price_25 = quantile(transactionamount, probs= 0.25, na.rm=T),
+		price_50 = quantile(transactionamount, probs= 0.50, na.rm=T),
+		price_75 = quantile(transactionamount, probs= 0.75, na.rm=T),
+		price_stdev = sd(transactionamount, na.rm=T)
+)
+datatable(exclusivearea_price)
+```
+
+
+## 2단계 탐색적 자료 분석
+### 2-1단계 시계열 분석 (2)
+
+- exclusivearea 별 매매가 분포 확인
+
+```{r}
+price <- DF_all %>% filter(location_1 == '서울특별시') %>%
+	group_by(contractyear , location_2) %>%
+	summarise(
+		count = n(),
+		price_mean = mean(transactionamount, na.rm=T),
+		price_25 = quantile(transactionamount, probs= 0.25, na.rm=T),
+		price_50 = quantile(transactionamount, probs= 0.50, na.rm=T),
+		price_75 = quantile(transactionamount, probs= 0.75, na.rm=T),
+		price_stdev = sd(transactionamount, na.rm=T)
+)
+
+datatable(price)
+```
+
+## 2단계 탐색적 자료 분석
+### 2-1단계 시계열 분석 (3)
+
+- 구별 거래 매매가 중앙값 확인
+
+
+```{r}
+ggplotly(
+price %>% filter (count >= 100) %>%
+ggplot(aes(contractyear , price_50, colour=location_2, group=location_2, fill=location_2)) + geom_line(alpha=1, size=2) +
+  xlab("") + ylab("가격 중앙값") +  
+  theme_bw() +  ggtitle("거래가격 중앙값(만원 단위)") +  
+  theme(plot.title = element_text(size=24,face="bold")) +
+  theme(axis.text=element_text(size=14),  axis.title=element_text(size=24,face="bold")) +  
+  theme(strip.text.y = element_text(colour = "black", face='bold', angle = 45, size = 20,
+                                    hjust = 0.5, vjust = 0.5)) +
+  theme(legend.text = element_text(colour="black", size = 7)))
+
+```
+
+## 2단계 탐색적 자료 분석
+### 2-1단계 시계열 분석 (3)
+
+- 0~66 전용 면젹, 구별 transactionamount 중앙값 확인
+
+
+```{r}
+price2 <- DF_all %>% filter(location_1 == '서울특별시' & exclusivearea_section == '0~66' ) %>%
+	group_by(contractyear , location_2) %>%
+	summarise(
+		count = n(),
+		price_mean = mean(transactionamount, na.rm=T),
+		price_25 = quantile(transactionamount, probs= 0.25, na.rm=T),
+		price_50 = quantile(transactionamount, probs= 0.50, na.rm=T),
+		price_75 = quantile(transactionamount, probs= 0.75, na.rm=T),
+		price_stdev = sd(transactionamount, na.rm=T)
+)
+
+ggplotly(
+price2 %>% filter (count >= 30) %>% 
+ggplot(aes(contractyear , price_50, colour=location_2, group=location_2, fill=location_2)) +  geom_line(alpha=1, size=1) +
+  xlab("") + ylab("가격 중앙값") +  
+  theme_bw() +  ggtitle("거래가격 중앙값(만원 단위)") +  
+  theme(plot.title = element_text(size=24,face="bold")) +
+  theme(axis.text=element_text(size=14),  axis.title=element_text(size=24,face="bold")) +  
+  theme(strip.text.y = element_text(colour = "black", face='bold', angle = 45, size = 20,
+                                    hjust = 0.5, vjust = 0.5)) +
+  theme(legend.text = element_text(colour="black", size = 7)))
+
+```
+
+
+## 2단계 탐색적 자료 분석
+### 2-1단계 시계열 분석 (4)
+
+- 전용 면적 section 별 거래 매매가 중앙값 확인
+
+```{r}
+exclusivearea_price <- DF_all %>% filter(location_1 == '서울특별시') %>%
+	group_by(contractyear , exclusivearea_section) %>%
+	summarise(
+		count = n(),
+		price_mean = mean(transactionamount, na.rm=T),
+		price_25 = quantile(transactionamount, probs= 0.25, na.rm=T),
+		price_50 = quantile(transactionamount, probs= 0.50, na.rm=T),
+		price_75 = quantile(transactionamount, probs= 0.75, na.rm=T),
+		price_stdev = sd(transactionamount, na.rm=T)
+)
+
+ggplotly(
+exclusivearea_price %>% filter (count >= 50) %>% 
+ggplot(aes(contractyear , price_50, colour=exclusivearea_section, group=exclusivearea_section, fill=exclusivearea_section)) +  geom_line(alpha=1, size=1) +
+  xlab("") + ylab("가격 중앙값") +  
+  theme_bw() +  ggtitle("거래가격 중앙값(만원 단위)") +  
+  theme(plot.title = element_text(size=24,face="bold")) +
+  theme(axis.text=element_text(size=14),  axis.title=element_text(size=24,face="bold")) +  
+  theme(strip.text.y = element_text(colour = "black", face='bold', angle = 45, size = 20,
+                                    hjust = 0.5, vjust = 0.5)) +
+  theme(legend.text = element_text(colour="black", size = 7)))
+
+```
+
+
+## 2단계 탐색적 자료 분석
+### 2-1단계 시계열 분석 (5)
+
+- 특정 지역 전용 면적 section 별 거래 매매가 중앙값 확인
+
+```{r}
+exclusivearea_location2_price <- DF_all %>% filter(location_1 == '서울특별시') %>%
+	group_by(contractyear , exclusivearea_section, location_2) %>%
+	summarise(
+		count = n(),
+		price_mean = mean(transactionamount, na.rm=T),
+		price_25 = quantile(transactionamount, probs= 0.25, na.rm=T),
+		price_50 = quantile(transactionamount, probs= 0.50, na.rm=T),
+		price_75 = quantile(transactionamount, probs= 0.75, na.rm=T),
+		price_stdev = sd(transactionamount, na.rm=T)
+)
+
+select_location <- c('강남구', '서초구', '종로구', '영등포구', '강서구', '마포구', '관악구', '강북구')
+select_section <- c('0~66', '67~100')
+
+ggplotly(
+exclusivearea_location2_price %>% filter (count >= 30 & location_2 %in% select_location & exclusivearea_section %in% select_section) %>% 
+ggplot(aes(contractyear , price_50, colour=location_2, group=location_2, fill=location_2)) +  geom_line(alpha=1, size=1) +
+  xlab("") + ylab("가격 중앙값") +  
+  theme_bw() +  ggtitle("거래가격 중앙값(만원 단위)") +  
+  theme(plot.title = element_text(size=24,face="bold")) + facet_grid(.~exclusivearea_section) +
+  theme(axis.text=element_text(size=14),  axis.title=element_text(size=24,face="bold")) +  
+  theme(strip.text.y = element_text(colour = "black", face='bold', angle = 45, size = 20,
+                                    hjust = 0.5, vjust = 0.5)) +
+  theme(legend.text = element_text(colour="black", size = 7))) 
+
+```
+
+## 2단계 탐색적 자료 분석
+### 2-2단계 맵지도 분석 (1)
+
+- 구글 맵 사용, 좌표는 시/구/동 기준으로 구글 맵에서 검색하며 찾음
+- 검색이 데스크탑에서는 데이터 확보가 느려서 1천개만 샘플링
+- 여기에서는 load 함수로 계산된 좌표 값 로딩
+
+```{r}
+#1천개 샘플링, 주소를 좌표계로 변환하는 과정이 개별 검색해서 좌표 값 얻어내므로 느림
+
+#DF_all2 <- DF_all[1:1000,]
+#DF_address <- as.data.frame(DF_all2[,'municipality'])
+#colnames(DF_address) <- 'municipality'
+#DF_address$municipality <- enc2utf8(as.character(DF_address$municipality))
+#DF_address2 <- mutate_geocode(DF_address, municipality, source = 'google')
+#DF_all2 <- DF_all2 %>% mutate(lon = DF_address2$lon, lat = DF_address2$lat)
+#save(DF_all2, file='DF_all2.Rdata')
+#write.csv(DF_all2, file='DF_all2.csv', row.names=FALSE)
+setwd("C:/budong/data/2017")
+load('DF_all2.Rdata')
+seoul_lonlat = unlist(geocode('seoul', source='google'))
+head(DF_all2)
+colnames(DF_all2) <- c('municipality', 'address', 'complex', 'exclusivearea', 'contractdate', 'transactionamount', 'floors', 'construction', 'roadname', 'contractyear', 'location_1', 'location_2', 'location_3', 'exclusivearea_section', 'lon', 'lat')
+
+```
+
+## 2단계 탐색적 자료 분석
+### 2-2단계 맵지도 분석 (2)
+
+- 1천개 샘플 데이터, 좌표 기반 매매가 가격(라벨)
+
+```{r}
+leaflet(DF_all2) %>%
+	setView(lng = seoul_lonlat[1],
+		  lat = seoul_lonlat[2],
+              zoom = 11) %>%
+	addTiles() %>%
+	addMarkers(lng = ~lon, lat = ~lat, popup = ~as.character(transactionamount), label = ~as.character(transactionamount)) %>%
+      addProviderTiles(providers$OpenStreetMap)
+
+```
+
+## 2단계 탐색적 자료 분석
+### 2-2단계 맵지도 분석 (3)
+
+- 1천개 샘플 데이터, 좌표별 카운트 분포
+
+```{r}
+DF_all3 <- DF_all2 %>% group_by(lon , lat) %>%
+	summarise(
+		count = n(),
+		exclusivearea_section_0_66 = sum(ifelse(exclusivearea_section == '0~66', 1, 0)),
+		exclusivearea_section_67_100 = sum(ifelse(exclusivearea_section == '67~100', 1, 0)),
+		exclusivearea_section_100_131 = sum(ifelse(exclusivearea_section == '100~131', 1, 0)),
+		exclusivearea_section_132_165 = sum(ifelse(exclusivearea_section == '132~165', 1, 0)),
+		price_25 = quantile(transactionamount, probs= 0.25, na.rm=T),
+		price_50 = quantile(transactionamount, probs= 0.50, na.rm=T),
+		price_75 = quantile(transactionamount, probs= 0.75, na.rm=T),
+		price_stdev = sd(transactionamount, na.rm=T)
+)
+DF_all3
+pal <- colorNumeric(c("red", "green", "blue", "yellow"), 1:10)
+
+
+basemap <- leaflet(width = "100%", height = "400px") %>%
+  setView(lng = seoul_lonlat[1],
+		  lat = seoul_lonlat[2],
+              zoom = 11) %>%
+  addTiles() %>%
+  addProviderTiles(providers$OpenStreetMap)
+
+basemap %>%
+  addMinicharts(
+    DF_all3$lon, DF_all3$lat,
+    chartdata = DF_all3$count,
+    showLabels = TRUE,
+    width = 45
+  )
+```
+
+## 2단계 탐색적 자료 분석
+### 2-2단계 맵지도 분석 (4)
+
+- 1천개 샘플 데이터, 좌표별 exclusivearea 파이 차트
+
+```{r}
+pal <- colorNumeric(c("red", "green", "blue", "yellow"), 1:10)
+
+basemap %>%
+  addMinicharts(
+    DF_all3$lon, DF_all3$lat,
+    type = "pie",
+    chartdata = DF_all3[, c("exclusivearea_section_0_66", "exclusivearea_section_67_100", "exclusivearea_section_100_131", "exclusivearea_section_132_165")], 
+    colorPalette = pal(c(1,6,9,10)), 
+    width = 45
+  )
+
+```
+
+## 2단계 탐색적 자료 분석
+### 2-2단계 맵지도 분석 (6)
+
+- 1천개 샘플 데이터, 좌표/exclusivearea별 매매가 가격 중앙값 비교
+
+```{r}
+pal <- colorNumeric(c("red", "green", "blue", "yellow"), 1:10)
+
+DF_all4 <- DF_all2 %>% group_by(lon , lat, exclusivearea_section) %>%
+	summarise(price_50 = quantile(transactionamount, probs= 0.50, na.rm=T)) 
+
+DF_all4 <- DF_all4 %>% spread(exclusivearea_section,price_50)
+DF_all4[is.na(DF_all4)] <- 0
+
+basemap %>%
+  addMinicharts(
+    DF_all4$lon, DF_all4$lat,
+    chartdata = DF_all4[, c("0~66","100~131","132~165","165~197","67~100")],
+    colorPalette = pal(c(1,6,9,10)),
+    width = 45
+  )
+```
+
